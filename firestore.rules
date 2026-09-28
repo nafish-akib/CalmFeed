@@ -1,0 +1,150 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function linkedGuardian(childUid) {
+      return get(/databases/$(database)/documents/relationships/$(childUid)).data.guardianUid;
+    }
+
+    match /invites/{inviteId} {
+      allow create: if signedIn()
+        && inviteId.matches('[A-F0-9]{32}')
+        && request.resource.data.keys().hasOnly([
+          'childUid', 'childName', 'createdAt', 'expiresAt', 'used'
+        ])
+        && request.resource.data.childUid == request.auth.uid
+        && request.resource.data.childName is string
+        && request.resource.data.childName.size() <= 32
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.expiresAt > request.time
+        && request.resource.data.expiresAt <= request.time + duration.value(11, 'm')
+        && request.resource.data.used == false;
+
+      allow get: if signedIn()
+        && resource.data.used == false
+        && resource.data.expiresAt > request.time
+        && resource.data.childUid != request.auth.uid;
+
+      allow update: if signedIn()
+        && resource.data.used == false
+        && resource.data.expiresAt > request.time
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['used', 'acceptedBy'])
+        && request.resource.data.used == true
+        && request.resource.data.acceptedBy == request.auth.uid
+        && getAfter(
+          /databases/$(database)/documents/relationships/$(resource.data.childUid)
+        ).data.inviteId == inviteId
+        && getAfter(
+          /databases/$(database)/documents/relationships/$(resource.data.childUid)
+        ).data.guardianUid == request.auth.uid;
+
+      allow list, delete: if false;
+    }
+
+    match /relationships/{childUid} {
+      allow get: if signedIn()
+        && (!exists(/databases/$(database)/documents/relationships/$(childUid))
+          || request.auth.uid == childUid
+          || resource.data.guardianUid == request.auth.uid);
+      allow list: if false;
+
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly([
+          'childUid', 'childName', 'guardianUid', 'guardianName', 'inviteId', 'linkedAt'
+        ])
+        && request.resource.data.childUid == childUid
+        && request.resource.data.guardianUid == request.auth.uid
+        && request.resource.data.childName is string
+        && request.resource.data.guardianName is string
+        && request.resource.data.guardianName.size() > 0
+        && request.resource.data.guardianName.size() <= 32
+        && request.resource.data.linkedAt == request.time
+        && getAfter(
+          /databases/$(database)/documents/invites/$(request.resource.data.inviteId)
+        ).data.childUid == childUid
+        && getAfter(
+          /databases/$(database)/documents/invites/$(request.resource.data.inviteId)
+        ).data.used == true
+        && getAfter(
+          /databases/$(database)/documents/invites/$(request.resource.data.inviteId)
+        ).data.acceptedBy == request.auth.uid;
+
+      allow update: if false;
+      allow delete: if signedIn()
+        && (request.auth.uid == childUid
+          || resource.data.guardianUid == request.auth.uid);
+    }
+
+    match /accessRequests/{childUid} {
+      allow get: if signedIn()
+        && (request.auth.uid == childUid
+          || resource.data.guardianUid == request.auth.uid
+            && linkedGuardian(childUid) == request.auth.uid);
+
+      allow list: if signedIn()
+        && resource.data.guardianUid == request.auth.uid
+        && linkedGuardian(childUid) == request.auth.uid;
+
+      allow create: if signedIn()
+        && request.auth.uid == childUid
+        && request.resource.data.keys().hasOnly([
+          'requestId', 'childUid', 'childName', 'guardianUid',
+          'status', 'budgetDate', 'createdAt'
+        ])
+        && request.resource.data.childUid == childUid
+        && request.resource.data.guardianUid == linkedGuardian(childUid)
+        && request.resource.data.requestId is string
+        && request.resource.data.childName is string
+        && request.resource.data.status == 'pending'
+        && request.resource.data.budgetDate is string
+        && request.resource.data.createdAt == request.time;
+
+      allow update: if signedIn() && (
+        request.auth.uid == resource.data.guardianUid
+          && linkedGuardian(childUid) == request.auth.uid
+          && resource.data.status == 'pending'
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['status', 'extraMinutes', 'respondedAt'])
+          && request.resource.data.status in ['approved', 'denied']
+          && request.resource.data.extraMinutes is int
+          && (request.resource.data.status == 'approved'
+            && request.resource.data.extraMinutes >= 1
+            && request.resource.data.extraMinutes <= 120
+            || request.resource.data.status == 'denied'
+            && request.resource.data.extraMinutes == 0)
+          && request.resource.data.respondedAt == request.time
+        ||
+        request.auth.uid == childUid
+          && resource.data.status == 'approved'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+          && request.resource.data.status == 'consumed'
+        ||
+        request.auth.uid == childUid
+          && resource.data.status != 'pending'
+          && request.resource.data.keys().hasOnly([
+            'requestId', 'childUid', 'childName', 'guardianUid',
+            'status', 'budgetDate', 'createdAt'
+          ])
+          && request.resource.data.childUid == childUid
+          && request.resource.data.guardianUid == linkedGuardian(childUid)
+          && request.resource.data.requestId is string
+          && request.resource.data.requestId != resource.data.requestId
+          && request.resource.data.childName is string
+          && request.resource.data.status == 'pending'
+          && request.resource.data.budgetDate is string
+          && request.resource.data.createdAt == request.time
+      );
+
+      allow delete: if signedIn() && request.auth.uid == childUid;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

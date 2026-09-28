@@ -18,8 +18,10 @@ Social sites open in their real pages; CalmFeed does not collect their passwords
   CalmFeed installation. The trusted person opens **Trusted circle → Approval requests**
   to review incoming requests. Their app checks for requests every 15 seconds while
   that screen is open.
-- Best-effort GeckoView page filters for selected short-video entry points and suggested
-  videos. Third-party markup changes can affect these filters.
+- GeckoView filters for selected short-video entry points and suggested videos, with a
+  20-video daily limit on Shorts/Reels pages. The limit counts downward swipes and
+  detects YouTube Shorts video changes as a fallback. Third-party page changes can
+  affect these filters.
 
 Daily allowance and session usage are stored locally on the user's device. Firebase
 Authentication and Cloud Firestore (Spark plan) are used only to pair trusted people
@@ -65,7 +67,7 @@ The current debug build targets arm64 devices such as the Galaxy A15.
 ## Prototype limitations
 
 Social-site page selectors and swipe counting are best-effort: sites may change their
-markup or scroll behavior. The 20-scroll Reels/Shorts filter is separate from the
+markup or scroll behavior. The 20-video Reels/Shorts filter is separate from the
 on-device time allowance. As this free design has no trusted server, a user who clears
 app data, changes the device clock, modifies the app, or bypasses CalmFeed can evade
 the local time limit. Firestore approvals require internet access. The trusted person

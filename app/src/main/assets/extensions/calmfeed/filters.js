@@ -36,6 +36,10 @@
   let lastScrollAt = 0;
   let touchStartY = null;
   let limitOverlay = null;
+  let shortVideosPage = false;
+  let accessBlocked = false;
+  let lastShortVideoId = null;
+  let lastGestureAt = 0;
 
   function hideMatches(root, selectors) {
     if (!(root instanceof Element || root instanceof Document)) return;
@@ -56,14 +60,15 @@
     }
   }
 
-  function isReelsOrShortsPage() {
+  function isShortVideosPage() {
     return location.pathname.split("/").some((part) =>
       ["reel", "reels", "shorts"].includes(part.toLowerCase())
     );
   }
 
-  function showLimitOverlay(count) {
+  function showLimitOverlay(count, unavailable = false) {
     if (limitOverlay || !document.body) return;
+    accessBlocked = true;
 
     limitOverlay = document.createElement("div");
     limitOverlay.setAttribute("role", "dialog");
@@ -83,13 +88,18 @@
       fontFamily: "system-ui, sans-serif",
       textAlign: "center"
     });
+    limitOverlay.style.touchAction = "none";
 
     const title = document.createElement("h1");
-    title.textContent = "That’s enough Reels for today.";
+    title.textContent = unavailable
+      ? "Shorts limit unavailable."
+      : "That’s enough Reels for today.";
     Object.assign(title.style, { fontSize: "28px", lineHeight: "1.2", maxWidth: "420px" });
 
     const detail = document.createElement("p");
-    detail.textContent = `You’ve reached your ${count}-scroll daily limit. Take a breath and choose what you’d like to do next.`;
+    detail.textContent = unavailable
+      ? "CalmFeed couldn’t verify today’s Shorts limit. Return Home and try again."
+      : `You’ve reached your ${count}-video daily limit. Take a breath and choose what you’d like to do next.`;
     Object.assign(detail.style, {
       color: "#b4c5bb",
       fontSize: "16px",
@@ -106,24 +116,76 @@
   }
 
   function requestScrollCount(increment) {
-    if (!isReelsOrShortsPage()) return;
-
     browser.runtime.sendMessage({ type: "calmfeed:reel-scroll", increment })
       .then((result) => {
-        if (result && result.count >= result.limit) showLimitOverlay(result.limit);
+        if (!result || typeof result.count !== "number" || typeof result.limit !== "number") {
+          showLimitOverlay(0, true);
+          return;
+        }
+        if (result.count >= result.limit) showLimitOverlay(result.limit);
       })
-      .catch((error) => console.error("CalmFeed could not update the Reels limit:", error));
+      .catch((error) => {
+        console.error("CalmFeed could not update the Reels limit:", error);
+        showLimitOverlay(0, true);
+      });
   }
 
   function countScrollGesture() {
+    if (!shortVideosPage || accessBlocked) return;
     const now = Date.now();
-    if (now - lastScrollAt < 850) return;
+    if (now - lastScrollAt < 350) return;
     lastScrollAt = now;
+    lastGestureAt = now;
     requestScrollCount(true);
+  }
+
+  function currentShortVideoId() {
+    const match = location.pathname.match(/^\/(?:shorts|reels?)\/([^/?#]+)/i);
+    return match ? match[1] : null;
+  }
+
+  function syncShortVideosPage() {
+    const active = isShortVideosPage();
+    if (active !== shortVideosPage) {
+      shortVideosPage = active;
+      if (active) {
+        lastShortVideoId = currentShortVideoId();
+        console.info("CalmFeed Shorts limit active.");
+        requestScrollCount(false);
+      } else {
+        lastShortVideoId = null;
+        if (limitOverlay) {
+          limitOverlay.remove();
+          limitOverlay = null;
+          accessBlocked = false;
+        }
+      }
+      return;
+    }
+
+    if (!active) return;
+    const videoId = currentShortVideoId();
+    if (videoId && lastShortVideoId && videoId !== lastShortVideoId
+        && Date.now() - lastGestureAt > 500) {
+      requestScrollCount(true);
+    }
+    if (videoId) {
+      lastShortVideoId = videoId;
+    }
+    if (!lastShortVideoId) {
+      lastShortVideoId = videoId;
+    }
+  }
+
+  function blockInteraction(event) {
+    if (!accessBlocked) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
   }
 
   hideMatches(document, reelSelectors);
   hideMatches(document, recommendationSelectors);
+  console.info("CalmFeed feed filters loaded.");
 
   const observer = new MutationObserver((records) => {
     for (const record of records) {
@@ -135,20 +197,43 @@
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
-  requestScrollCount(false);
+  syncShortVideosPage();
+  window.addEventListener("popstate", syncShortVideosPage);
+  window.addEventListener("yt-navigate-finish", syncShortVideosPage);
+  const routePoll = window.setInterval(syncShortVideosPage, 250);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) syncShortVideosPage();
+  });
+  const originalPushState = history.pushState;
+  history.pushState = function (...args) {
+    originalPushState.apply(this, args);
+    syncShortVideosPage();
+  };
+  const originalReplaceState = history.replaceState;
+  history.replaceState = function (...args) {
+    originalReplaceState.apply(this, args);
+    syncShortVideosPage();
+  };
+
   document.addEventListener("wheel", (event) => {
     if (event.deltaY > 10) countScrollGesture();
-  }, { passive: true });
+  }, { passive: true, capture: true });
   document.addEventListener("touchstart", (event) => {
     touchStartY = event.changedTouches.length ? event.changedTouches[0].clientY : null;
-  }, { passive: true });
+  }, { passive: true, capture: true });
   document.addEventListener("touchend", (event) => {
     if (touchStartY === null || !event.changedTouches.length) return;
     const endY = event.changedTouches[0].clientY;
     if (touchStartY - endY > 35) countScrollGesture();
     touchStartY = null;
-  }, { passive: true });
+  }, { passive: true, capture: true });
+  document.addEventListener("touchcancel", () => {
+    touchStartY = null;
+  }, { passive: true, capture: true });
   document.addEventListener("keydown", (event) => {
     if (event.key === "ArrowDown" || event.key === "PageDown") countScrollGesture();
-  });
+  }, true);
+  document.addEventListener("touchmove", blockInteraction, { passive: false, capture: true });
+  document.addEventListener("wheel", blockInteraction, { passive: false, capture: true });
+  document.addEventListener("keydown", blockInteraction, true);
 })();

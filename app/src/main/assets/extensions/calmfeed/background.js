@@ -2,6 +2,7 @@
 
 const DAILY_REEL_LIMIT = 20;
 const USAGE_KEY = "dailyReelScrolls";
+let scrollCountQueue = Promise.resolve();
 
 function localDateKey() {
   const date = new Date();
@@ -18,17 +19,20 @@ async function readTodayCount() {
   return usage && usage.date === localDateKey() ? usage.count : 0;
 }
 
-browser.runtime.onMessage.addListener(async (message) => {
+browser.runtime.onMessage.addListener((message) => {
   if (!message || message.type !== "calmfeed:reel-scroll") return undefined;
 
-  const count = await readTodayCount();
-  if (!message.increment || count >= DAILY_REEL_LIMIT) {
-    return { count, limit: DAILY_REEL_LIMIT };
-  }
+  scrollCountQueue = scrollCountQueue.then(async () => {
+    const count = await readTodayCount();
+    if (message.increment !== true || count >= DAILY_REEL_LIMIT) {
+      return { count, limit: DAILY_REEL_LIMIT };
+    }
 
-  const nextCount = count + 1;
-  await browser.storage.local.set({
-    [USAGE_KEY]: { date: localDateKey(), count: nextCount }
+    const nextCount = count + 1;
+    await browser.storage.local.set({
+      [USAGE_KEY]: { date: localDateKey(), count: nextCount }
+    });
+    return { count: nextCount, limit: DAILY_REEL_LIMIT };
   });
-  return { count: nextCount, limit: DAILY_REEL_LIMIT };
+  return scrollCountQueue;
 });

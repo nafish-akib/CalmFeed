@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "CalmFeed Filters",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "browser_specific_settings": {
     "gecko": {
       "id": "calmfeed-filters@calmfeed.app",
@@ -12,7 +12,8 @@
     "storage",
     "*://*.youtube.com/*",
     "*://*.instagram.com/*",
-    "*://*.facebook.com/*"
+    "*://*.facebook.com/*",
+    "*://*.tiktok.com/*"
   ],
   "background": {
     "scripts": ["background.js"],
@@ -24,10 +25,11 @@
         "*://www.youtube.com/*",
         "*://m.youtube.com/*",
         "*://www.instagram.com/*",
-        "*://www.facebook.com/*"
+        "*://*.facebook.com/*",
+        "*://*.tiktok.com/*"
       ],
       "js": ["filters.js"],
-      "run_at": "document_idle"
+      "run_at": "document_start"
     }
   ]
 }

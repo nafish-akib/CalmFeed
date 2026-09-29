@@ -1,0 +1,14 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <!-- Red rounded button -->
+    <path
+        android:fillColor="#FF0000"
+        android:pathData="M43.2,14.8c-0.5,-1.9 -2,-3.4 -3.9,-3.9C35.8,10 24,10 24,10s-11.8,0 -15.3,0.9c-1.9,0.5 -3.4,2 -3.9,3.9C3.9,18.3 3.9,24 3.9,24s0,5.7 0.9,9.2c0.5,1.9 2,3.4 3.9,3.9C12.2,38 24,38 24,38s11.8,0 15.3,-0.9c1.9,-0.5 3.4,-2 3.9,-3.9c0.9,-3.5 0.9,-9.2 0.9,-9.2S44.1,18.3 43.2,14.8z" />
+    <!-- White Play Triangle -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M20,18l11,6l-11,6z" />
+</vector>

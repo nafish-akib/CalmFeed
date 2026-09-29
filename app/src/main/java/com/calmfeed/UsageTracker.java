@@ -44,25 +44,31 @@ final class UsageTracker {
         editor.apply();
     }
 
+    static boolean isSocialSite(String url) {
+        if (url == null) return false;
+        String u = url.toLowerCase();
+        return u.contains("youtube.com") || u.contains("youtu.be")
+                || u.contains("facebook.com") || u.contains("fb.com")
+                || u.contains("tiktok.com")
+                || u.contains("instagram.com");
+    }
+
     static boolean setTodayAllowance(Context context, int minutes) {
         SharedPreferences preferences = preferences(context);
         String today = LocalDate.now().toString();
-        if (today.equals(preferences.getString(ALLOWANCE_DATE, ""))) return false;
         return preferences.edit()
                 .putString(ALLOWANCE_DATE, today)
                 .putInt(ALLOWANCE_MINUTES, minutes)
-                .putString(EXTRA_DATE, today)
-                .putLong(EXTRA_GRANTED, 0)
-                .putLong(EXTRA_USED, 0)
-                .putString(LAST_GRANT_ID, "")
                 .commit();
     }
 
     static int getTodayAllowanceMinutes(Context context) {
         SharedPreferences preferences = preferences(context);
-        return LocalDate.now().toString().equals(preferences.getString(ALLOWANCE_DATE, ""))
-                ? preferences.getInt(ALLOWANCE_MINUTES, 0)
-                : 0;
+        String today = LocalDate.now().toString();
+        if (today.equals(preferences.getString(ALLOWANCE_DATE, ""))) {
+            return preferences.getInt(ALLOWANCE_MINUTES, 30);
+        }
+        return 30; // Default 30 minutes social media focus allowance
     }
 
     static long getDailyRemainingSeconds(Context context) {

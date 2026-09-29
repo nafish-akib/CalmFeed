@@ -1,0 +1,14 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <!-- Wikipedia badge background -->
+    <path
+        android:fillColor="#222222"
+        android:pathData="M38,4H10C6.7,4 4,6.7 4,10v28c0,3.3 2.7,6 6,6h28c3.3,0 6,-2.7 6,-6V10C44,6.7 41.3,4 38,4z" />
+    <!-- Stylized Wikipedia 'W' with distinctive serifs -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M11,14h5.2l4.8,17.2l4.5,-12.7l-2.4,-4.5h5.4l4.5,17.2l5,-17.2h4.5l-7.2,22h-4.3l-4.9,-16.8l-4.9,16.8H17L11,14z" />
+</vector>

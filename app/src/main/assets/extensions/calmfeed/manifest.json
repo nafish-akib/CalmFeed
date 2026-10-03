@@ -10,10 +10,9 @@
   },
   "permissions": [
     "storage",
-    "*://*.youtube.com/*",
-    "*://*.instagram.com/*",
-    "*://*.facebook.com/*",
-    "*://*.tiktok.com/*"
+    "webRequest",
+    "webRequestBlocking",
+    "<all_urls>"
   ],
   "background": {
     "scripts": ["background.js"],
@@ -22,11 +21,7 @@
   "content_scripts": [
     {
       "matches": [
-        "*://www.youtube.com/*",
-        "*://m.youtube.com/*",
-        "*://www.instagram.com/*",
-        "*://*.facebook.com/*",
-        "*://*.tiktok.com/*"
+        "<all_urls>"
       ],
       "js": ["filters.js"],
       "run_at": "document_start"

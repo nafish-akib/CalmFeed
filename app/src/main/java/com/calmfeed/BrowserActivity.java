@@ -31,10 +31,14 @@ import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.PopupMenu;
 import android.widget.ProgressBar;
+import android.widget.ScrollView;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import org.mozilla.geckoview.AllowOrDeny;
+import org.mozilla.geckoview.ContentBlocking;
 import org.mozilla.geckoview.GeckoResult;
 import org.mozilla.geckoview.GeckoRuntime;
 import org.mozilla.geckoview.GeckoSession;
@@ -54,7 +58,14 @@ public class BrowserActivity extends Activity {
     public static final String EXTRA_INCOGNITO = "com.calmfeed.INCOGNITO";
 
     private static synchronized GeckoRuntime getSharedRuntime(Context context) {
-        return GeckoRuntime.getDefault(context.getApplicationContext());
+        GeckoRuntime runtime = GeckoRuntime.getDefault(context.getApplicationContext());
+        try {
+            ContentBlocking.Settings cb = runtime.getSettings().getContentBlocking();
+            cb.setEnhancedTrackingProtectionLevel(ContentBlocking.EtpLevel.STRICT);
+            cb.setStrictSocialTrackingProtection(true);
+            cb.setCookieBehavior(ContentBlocking.CookieBehavior.ACCEPT_NON_TRACKERS);
+        } catch (Exception ignored) {}
+        return runtime;
     }
 
     // Theme Colors
@@ -77,6 +88,8 @@ public class BrowserActivity extends Activity {
     private TextView securityIcon;
     private TextView clearUrlButton;
     private TextView reloadStopButton;
+    private TextView readerButton;
+    private TextView tabsButton;
     private TextView menuButton;
     private ProgressBar pageProgressBar;
     private TextView timerLabel;
@@ -84,10 +97,34 @@ public class BrowserActivity extends Activity {
     private Button forwardButton;
     private Button homeButton;
     private Button bookmarkButton;
+    private TextView scrollToTopButton;
+
+    // Tab System
+    public static class TabItem {
+        public String id;
+        public String url;
+        public String title;
+        public GeckoSession session;
+        public int blockedTrackersCount = 0;
+        public int lastSecurityStatus = 0;
+
+        public TabItem(String id, String url, String title, GeckoSession session) {
+            this.id = id;
+            this.url = url;
+            this.title = title;
+            this.session = session;
+            this.blockedTrackersCount = 0;
+            this.lastSecurityStatus = 0;
+        }
+    }
+
+    private final List<TabItem> tabs = new ArrayList<>();
+    private int activeTabIndex = 0;
 
     private boolean isIncognito = false;
     private boolean isDesktopMode = false;
     private boolean isFullScreen = false;
+    private boolean isReaderMode = false;
     private boolean canGoBack = false;
     private boolean canGoForward = false;
     private boolean isLoading = false;
@@ -101,6 +138,13 @@ public class BrowserActivity extends Activity {
     private long activeSegmentStartElapsed = -1;
     private long completedSessionMillis = 0;
     private long recordedSeconds = 0;
+    private long activeBrowsingStartElapsed = -1;
+
+    // Find in Page
+    private LinearLayout findInPageLayout;
+    private EditText findQueryInput;
+    private TextView findMatchCount;
+
     private String sessionId;
     private String sessionSource;
     private boolean browserVisible;
@@ -140,6 +184,10 @@ public class BrowserActivity extends Activity {
         // 1. Omnibox / Top App Bar
         buildTopAppBar();
         browserRoot.addView(appBarLayout);
+
+        // 1b. Find in Page Bar
+        buildFindInPageBar();
+        browserRoot.addView(findInPageLayout);
 
         // 2. Loading Progress Bar
         pageProgressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
@@ -252,6 +300,15 @@ public class BrowserActivity extends Activity {
         clearUrlButton.setOnClickListener(v -> urlInput.setText(""));
         addressPill.addView(clearUrlButton);
 
+        // Clean Reader View button (📖) - for distraction-free reading
+        readerButton = new TextView(this);
+        readerButton.setText("📖");
+        readerButton.setTextSize(16);
+        readerButton.setPadding(dp(6), dp(4), dp(6), dp(4));
+        readerButton.setContentDescription("Toggle clean Reader View");
+        readerButton.setOnClickListener(v -> toggleReaderView());
+        addressPill.addView(readerButton);
+
         // Reload / Stop button
         reloadStopButton = new TextView(this);
         reloadStopButton.setText("↻");
@@ -271,6 +328,25 @@ public class BrowserActivity extends Activity {
 
         appBarLayout.addView(addressPill, new LinearLayout.LayoutParams(0, dp(44), 1.0f));
 
+        // Tab Tray Counter Button [ 1 ]
+        tabsButton = new TextView(this);
+        tabsButton.setText("1");
+        tabsButton.setTextSize(12);
+        tabsButton.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        tabsButton.setTextColor(TEXT_COLOR);
+        tabsButton.setGravity(Gravity.CENTER);
+        tabsButton.setPadding(dp(6), dp(4), dp(6), dp(4));
+        GradientDrawable tabBadgeBg = new GradientDrawable();
+        tabBadgeBg.setColor(SURFACE_COLOR);
+        tabBadgeBg.setCornerRadius(dp(8));
+        tabBadgeBg.setStroke(dp(1), Color.rgb(51, 65, 85));
+        tabsButton.setBackground(tabBadgeBg);
+        tabsButton.setContentDescription("Open Tab Switcher Tray");
+        tabsButton.setOnClickListener(v -> showTabTray());
+        LinearLayout.LayoutParams tabBadgeParams = new LinearLayout.LayoutParams(dp(32), dp(32));
+        tabBadgeParams.leftMargin = dp(6);
+        appBarLayout.addView(tabsButton, tabBadgeParams);
+
         // Overflow Menu button (⋮)
         menuButton = new TextView(this);
         menuButton.setText("⋮");
@@ -281,6 +357,106 @@ public class BrowserActivity extends Activity {
         menuButton.setPadding(dp(12), dp(4), dp(8), dp(4));
         menuButton.setOnClickListener(this::showOverflowMenu);
         appBarLayout.addView(menuButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)));
+    }
+
+    private void buildFindInPageBar() {
+        findInPageLayout = new LinearLayout(this);
+        findInPageLayout.setOrientation(LinearLayout.HORIZONTAL);
+        findInPageLayout.setGravity(Gravity.CENTER_VERTICAL);
+        findInPageLayout.setPadding(dp(10), dp(4), dp(8), dp(4));
+        findInPageLayout.setBackgroundColor(Color.rgb(15, 23, 42));
+        findInPageLayout.setVisibility(View.GONE);
+
+        TextView icon = new TextView(this);
+        icon.setText("🔍");
+        icon.setTextSize(14);
+        icon.setPadding(0, 0, dp(6), 0);
+        findInPageLayout.addView(icon);
+
+        findQueryInput = new EditText(this);
+        findQueryInput.setHint("Find in page…");
+        findQueryInput.setHintTextColor(MUTED_COLOR);
+        findQueryInput.setTextColor(TEXT_COLOR);
+        findQueryInput.setTextSize(14);
+        findQueryInput.setBackgroundColor(Color.TRANSPARENT);
+        findQueryInput.setSingleLine(true);
+        findQueryInput.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
+        findQueryInput.setOnEditorActionListener((v, actionId, event) -> {
+            executeFind(false);
+            return true;
+        });
+        findQueryInput.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
+            @Override
+            public void afterTextChanged(Editable s) {
+                executeFind(false);
+            }
+        });
+        findInPageLayout.addView(findQueryInput, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
+
+        findMatchCount = new TextView(this);
+        findMatchCount.setText("0/0");
+        findMatchCount.setTextColor(ACCENT_COLOR);
+        findMatchCount.setTextSize(12);
+        findMatchCount.setPadding(dp(4), 0, dp(6), 0);
+        findInPageLayout.addView(findMatchCount);
+
+        Button prevBtn = navButton("▲", "Previous Match");
+        prevBtn.setTextSize(14);
+        prevBtn.setOnClickListener(v -> executeFind(true));
+        findInPageLayout.addView(prevBtn);
+
+        Button nextBtn = navButton("▼", "Next Match");
+        nextBtn.setTextSize(14);
+        nextBtn.setOnClickListener(v -> executeFind(false));
+        findInPageLayout.addView(nextBtn);
+
+        Button closeBtn = navButton("✕", "Close Find");
+        closeBtn.setTextSize(14);
+        closeBtn.setOnClickListener(v -> hideFindInPage());
+        findInPageLayout.addView(closeBtn);
+    }
+
+    private void showFindInPage() {
+        if (findInPageLayout == null) return;
+        findInPageLayout.setVisibility(View.VISIBLE);
+        findQueryInput.requestFocus();
+        InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        if (imm != null) imm.showSoftInput(findQueryInput, InputMethodManager.SHOW_IMPLICIT);
+        executeFind(false);
+    }
+
+    private void hideFindInPage() {
+        if (findInPageLayout == null) return;
+        findInPageLayout.setVisibility(View.GONE);
+        if (session != null) {
+            session.getFinder().clear();
+        }
+        findMatchCount.setText("0/0");
+        findQueryInput.clearFocus();
+        hideKeyboard();
+    }
+
+    private void executeFind(boolean backwards) {
+        if (session == null || findQueryInput == null) return;
+        String query = findQueryInput.getText().toString();
+        if (TextUtils.isEmpty(query)) {
+            session.getFinder().clear();
+            findMatchCount.setText("0/0");
+            return;
+        }
+        int flags = backwards ? GeckoSession.FINDER_FIND_BACKWARDS : 0;
+        session.getFinder().find(query, flags).then(res -> {
+            runOnUiThread(() -> {
+                if (res != null && res.found) {
+                    findMatchCount.setText(res.current + "/" + res.total);
+                } else {
+                    findMatchCount.setText("0/0");
+                }
+            });
+            return null;
+        });
     }
 
     private void buildBottomBar() {
@@ -348,9 +524,11 @@ public class BrowserActivity extends Activity {
 
     private void updateSiteMode(String url) {
         if (isFinishing()) return;
-        boolean isSocial = UsageTracker.isSocialSite(url);
+        boolean isSocial = UsageTracker.isSiteLimited(this, url);
 
         if (isSocial) {
+            recordBrowsingUsage();
+            activeBrowsingStartElapsed = -1;
             // SOCIAL MEDIA: Check and enforce daily limit!
             long remainingSec = UsageTracker.getDailyRemainingSeconds(this) + UsageTracker.getExtraRemainingSeconds(this);
             int allowanceMin = UsageTracker.getTodayAllowanceMinutes(this);
@@ -374,8 +552,31 @@ public class BrowserActivity extends Activity {
             pauseSocialTimer();
             sessionDurationMillis = 0;
             remainingSessionMillis = 0;
+            if (browserVisible && !isIncognito) {
+                activeBrowsingStartElapsed = SystemClock.elapsedRealtime();
+            }
             timerLabel.setText(isIncognito ? "🕶️ Private Browsing" : "🌐 Browsing Mode");
             timerLabel.setTextColor(isIncognito ? ACCENT_BLUE : ACCENT_COLOR);
+        }
+
+        if (readerButton != null) {
+            readerButton.setVisibility(isSocial ? View.GONE : View.VISIBLE);
+        }
+    }
+
+    private void toggleReaderView() {
+        if (session != null) {
+            isReaderMode = !isReaderMode;
+            if (readerButton != null) {
+                readerButton.setTextColor(isReaderMode ? ACCENT_COLOR : TEXT_COLOR);
+            }
+            session.loadUri("javascript:(function(){" +
+                    "if(typeof window.__calmfeed_toggle_reader==='function'){" +
+                    "  window.__calmfeed_toggle_reader();" +
+                    "}else{" +
+                    "  window.dispatchEvent(new CustomEvent('calmfeed:toggle-reader'));" +
+                    "}" +
+                    "})();");
         }
     }
 
@@ -404,6 +605,13 @@ public class BrowserActivity extends Activity {
                             session.loadUri("https://www.google.com");
                         }
                     })
+                    .setNeutralButton("🧘 1-Min Mindful Breath", (d, w) -> {
+                        MindfulBreathingHelper.show(BrowserActivity.this, () -> {
+                            if (session != null) {
+                                session.loadUri("https://www.google.com");
+                            }
+                        });
+                    })
                     .setNegativeButton("🏠 Return Home", (d, w) -> finish())
                     .setCancelable(false)
                     .show();
@@ -413,6 +621,44 @@ public class BrowserActivity extends Activity {
     private void openGeckoView() {
         if (isFinishing()) return;
 
+        geckoView = new GeckoView(this);
+        containerView.removeAllViews();
+        containerView.addView(geckoView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // Floating Scroll To Top Pill
+        scrollToTopButton = new TextView(this);
+        scrollToTopButton.setText("↑ Top");
+        scrollToTopButton.setTextSize(12);
+        scrollToTopButton.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        scrollToTopButton.setTextColor(Color.WHITE);
+        scrollToTopButton.setPadding(dp(12), dp(8), dp(12), dp(8));
+        GradientDrawable sttBg = new GradientDrawable();
+        sttBg.setColor(Color.argb(215, 15, 23, 42));
+        sttBg.setCornerRadius(dp(18));
+        sttBg.setStroke(dp(1), ACCENT_COLOR);
+        scrollToTopButton.setBackground(sttBg);
+        scrollToTopButton.setVisibility(View.GONE);
+        scrollToTopButton.setOnClickListener(v -> {
+            if (session != null) {
+                session.loadUri("javascript:window.scrollTo({top:0,behavior:'smooth'});");
+            }
+        });
+        FrameLayout.LayoutParams sttParams = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        sttParams.gravity = Gravity.BOTTOM | Gravity.END;
+        sttParams.bottomMargin = dp(20);
+        sttParams.rightMargin = dp(16);
+        containerView.addView(scrollToTopButton, sttParams);
+
+        // Load starting URL
+        String targetUrl = getIntent().getStringExtra(EXTRA_URL);
+        if (TextUtils.isEmpty(targetUrl)) {
+            targetUrl = "https://www.google.com";
+        }
+
+        createNewTab(targetUrl);
+    }
+
+    private GeckoSession createGeckoSession(TabItem tab) {
         GeckoRuntime runtime = getSharedRuntime(this);
 
         GeckoSessionSettings.Builder settingsBuilder = new GeckoSessionSettings.Builder();
@@ -423,11 +669,11 @@ public class BrowserActivity extends Activity {
             settingsBuilder.userAgentMode(GeckoSessionSettings.USER_AGENT_MODE_DESKTOP);
         }
 
-        session = new GeckoSession(settingsBuilder.build());
-        session.open(runtime);
+        GeckoSession s = new GeckoSession(settingsBuilder.build());
+        s.open(runtime);
 
-        // 1. ContentDelegate for FULLSCREEN VIDEO (YouTube) & Page Title
-        session.setContentDelegate(new GeckoSession.ContentDelegate() {
+        // 1. ContentDelegate for FullScreen, Title, Context Menu, and Crash Recovery
+        s.setContentDelegate(new GeckoSession.ContentDelegate() {
             @Override
             public void onFullScreen(GeckoSession geckoSession, boolean fullScreen) {
                 runOnUiThread(() -> handleFullScreen(fullScreen));
@@ -436,16 +682,167 @@ public class BrowserActivity extends Activity {
             @Override
             public void onTitleChange(GeckoSession geckoSession, String title) {
                 runOnUiThread(() -> {
-                    currentTitle = title != null ? title : "";
-                    if (!urlInput.hasFocus()) {
-                        updateDisplayUrl(currentUrl);
+                    tab.title = title != null ? title : "";
+                    if (s == session) {
+                        currentTitle = tab.title;
+                        if (!urlInput.hasFocus()) {
+                            updateDisplayUrl(currentUrl);
+                        }
+                    }
+                });
+            }
+
+            @Override
+            public void onContextMenu(GeckoSession geckoSession, int screenX, int screenY, GeckoSession.ContentDelegate.ContextElement element) {
+                runOnUiThread(() -> showWebContextMenu(element));
+            }
+
+            @Override
+            public void onCrash(GeckoSession geckoSession) {
+                runOnUiThread(() -> handleContentCrash(s));
+            }
+
+            @Override
+            public void onKill(GeckoSession geckoSession) {
+                runOnUiThread(() -> handleContentCrash(s));
+            }
+        });
+
+        // 2. ContentBlocking.Delegate for Real-Time Enhanced Tracking Protection (ETP)
+        s.setContentBlockingDelegate(new ContentBlocking.Delegate() {
+            @Override
+            public void onContentBlocked(GeckoSession geckoSession, ContentBlocking.BlockEvent event) {
+                runOnUiThread(() -> {
+                    tab.blockedTrackersCount++;
+                    if (s == session) {
+                        updateSecurityBadge();
                     }
                 });
             }
         });
 
-        // 2. NavigationDelegate for Back/Forward state and App Scheme blocking
-        session.setNavigationDelegate(new GeckoSession.NavigationDelegate() {
+        // 3. ScrollDelegate for Smooth Scroll Depth & Fast "Back to Top"
+        s.setScrollDelegate(new GeckoSession.ScrollDelegate() {
+            @Override
+            public void onScrollChanged(GeckoSession geckoSession, int scrollX, int scrollY) {
+                runOnUiThread(() -> {
+                    if (geckoSession == session && scrollToTopButton != null) {
+                        scrollToTopButton.setVisibility(scrollY > dp(350) ? View.VISIBLE : View.GONE);
+                    }
+                });
+            }
+        });
+
+        // 4. HistoryDelegate for SPA client-side route tracking
+        s.setHistoryDelegate(new GeckoSession.HistoryDelegate() {
+            @Override
+            public GeckoResult<Boolean> onVisited(GeckoSession geckoSession, String url, String lastVisitedUrl, int flags) {
+                runOnUiThread(() -> {
+                    if (geckoSession == session && !TextUtils.isEmpty(url)) {
+                        currentUrl = url;
+                        tab.url = url;
+                        if (!urlInput.hasFocus()) {
+                            updateDisplayUrl(url);
+                        }
+                        updateSiteMode(url);
+                        if (!isIncognito) {
+                            String titleToSave = !TextUtils.isEmpty(currentTitle) ? currentTitle : url;
+                            BrowserHistoryManager.add(BrowserActivity.this, titleToSave, url);
+                        }
+                    }
+                });
+                return GeckoResult.fromValue(true);
+            }
+        });
+
+        // 5. PromptDelegate for Web Alert, Confirm, Prompt, and BeforeUnload Dialogs
+        s.setPromptDelegate(new GeckoSession.PromptDelegate() {
+            @Override
+            public GeckoResult<PromptResponse> onAlertPrompt(GeckoSession geckoSession, AlertPrompt prompt) {
+                GeckoResult<PromptResponse> res = new GeckoResult<>();
+                runOnUiThread(() -> {
+                    if (isFinishing()) {
+                        res.complete(prompt.dismiss());
+                        return;
+                    }
+                    new AlertDialog.Builder(BrowserActivity.this)
+                            .setTitle(!TextUtils.isEmpty(prompt.title) ? prompt.title : "Web Alert")
+                            .setMessage(prompt.message != null ? prompt.message : "")
+                            .setPositiveButton("OK", (d, w) -> res.complete(prompt.dismiss()))
+                            .setOnCancelListener(d -> res.complete(prompt.dismiss()))
+                            .show();
+                });
+                return res;
+            }
+
+            @Override
+            public GeckoResult<PromptResponse> onButtonPrompt(GeckoSession geckoSession, ButtonPrompt prompt) {
+                GeckoResult<PromptResponse> res = new GeckoResult<>();
+                runOnUiThread(() -> {
+                    if (isFinishing()) {
+                        res.complete(prompt.dismiss());
+                        return;
+                    }
+                    new AlertDialog.Builder(BrowserActivity.this)
+                            .setTitle(!TextUtils.isEmpty(prompt.title) ? prompt.title : "Confirm Action")
+                            .setMessage(prompt.message != null ? prompt.message : "")
+                            .setPositiveButton("OK", (d, w) -> res.complete(prompt.confirm(0)))
+                            .setNegativeButton("Cancel", (d, w) -> res.complete(prompt.dismiss()))
+                            .setOnCancelListener(d -> res.complete(prompt.dismiss()))
+                            .show();
+                });
+                return res;
+            }
+
+            @Override
+            public GeckoResult<PromptResponse> onTextPrompt(GeckoSession geckoSession, TextPrompt prompt) {
+                GeckoResult<PromptResponse> res = new GeckoResult<>();
+                runOnUiThread(() -> {
+                    if (isFinishing()) {
+                        res.complete(prompt.dismiss());
+                        return;
+                    }
+                    EditText input = new EditText(BrowserActivity.this);
+                    input.setTextColor(TEXT_COLOR);
+                    input.setPadding(dp(16), dp(12), dp(16), dp(12));
+                    if (prompt.defaultValue != null) {
+                        input.setText(prompt.defaultValue);
+                        input.setSelection(prompt.defaultValue.length());
+                    }
+                    new AlertDialog.Builder(BrowserActivity.this)
+                            .setTitle(!TextUtils.isEmpty(prompt.title) ? prompt.title : "Input Required")
+                            .setMessage(prompt.message != null ? prompt.message : "")
+                            .setView(input)
+                            .setPositiveButton("Submit", (d, w) -> res.complete(prompt.confirm(input.getText().toString())))
+                            .setNegativeButton("Cancel", (d, w) -> res.complete(prompt.dismiss()))
+                            .setOnCancelListener(d -> res.complete(prompt.dismiss()))
+                            .show();
+                });
+                return res;
+            }
+
+            @Override
+            public GeckoResult<PromptResponse> onBeforeUnloadPrompt(GeckoSession geckoSession, BeforeUnloadPrompt prompt) {
+                GeckoResult<PromptResponse> res = new GeckoResult<>();
+                runOnUiThread(() -> {
+                    if (isFinishing()) {
+                        res.complete(prompt.dismiss());
+                        return;
+                    }
+                    new AlertDialog.Builder(BrowserActivity.this)
+                            .setTitle("Leave Web Page?")
+                            .setMessage("You have unsaved changes that may be lost.")
+                            .setPositiveButton("Leave", (d, w) -> res.complete(prompt.confirm(AllowOrDeny.ALLOW)))
+                            .setNegativeButton("Stay", (d, w) -> res.complete(prompt.confirm(AllowOrDeny.DENY)))
+                            .setOnCancelListener(d -> res.complete(prompt.dismiss()))
+                            .show();
+                });
+                return res;
+            }
+        });
+
+        // 6. NavigationDelegate for Back/Forward state and App Scheme blocking
+        s.setNavigationDelegate(new GeckoSession.NavigationDelegate() {
             @Override
             public GeckoResult<AllowOrDeny> onLoadRequest(GeckoSession geckoSession, GeckoSession.NavigationDelegate.LoadRequest request) {
                 if (request != null && request.uri != null) {
@@ -461,62 +858,76 @@ public class BrowserActivity extends Activity {
             @Override
             public void onCanGoBack(GeckoSession geckoSession, boolean allowed) {
                 runOnUiThread(() -> {
-                    canGoBack = allowed;
-                    backButton.setEnabled(allowed);
-                    backButton.setAlpha(allowed ? 1.0f : 0.4f);
+                    if (s == session) {
+                        canGoBack = allowed;
+                        backButton.setEnabled(allowed);
+                        backButton.setAlpha(allowed ? 1.0f : 0.4f);
+                    }
                 });
             }
 
             @Override
             public void onCanGoForward(GeckoSession geckoSession, boolean allowed) {
                 runOnUiThread(() -> {
-                    canGoForward = allowed;
-                    forwardButton.setEnabled(allowed);
-                    forwardButton.setAlpha(allowed ? 1.0f : 0.4f);
+                    if (s == session) {
+                        canGoForward = allowed;
+                        forwardButton.setEnabled(allowed);
+                        forwardButton.setAlpha(allowed ? 1.0f : 0.4f);
+                    }
                 });
             }
         });
 
-        // 3. ProgressDelegate for Page Load Progress & History recording
-        session.setProgressDelegate(new GeckoSession.ProgressDelegate() {
+        // 7. ProgressDelegate for Page Load Progress & History recording
+        s.setProgressDelegate(new GeckoSession.ProgressDelegate() {
             @Override
             public void onPageStart(GeckoSession geckoSession, String url) {
                 runOnUiThread(() -> {
-                    isLoading = true;
-                    currentUrl = url;
-                    updateSiteMode(url);
-                    reloadStopButton.setText("✕");
-                    pageProgressBar.setVisibility(View.VISIBLE);
-                    pageProgressBar.setProgress(15);
-                    if (!urlInput.hasFocus()) {
-                        updateDisplayUrl(url);
+                    tab.url = url;
+                    tab.blockedTrackersCount = 0;
+                    if (s == session) {
+                        isLoading = true;
+                        currentUrl = url;
+                        updateSiteMode(url);
+                        updateSecurityBadge();
+                        reloadStopButton.setText("✕");
+                        pageProgressBar.setVisibility(View.VISIBLE);
+                        pageProgressBar.setProgress(15);
+                        if (!urlInput.hasFocus()) {
+                            updateDisplayUrl(url);
+                        }
+                        updateBookmarkIcon();
                     }
-                    updateBookmarkIcon();
                 });
             }
 
             @Override
             public void onProgressChange(GeckoSession geckoSession, int progress) {
                 runOnUiThread(() -> {
-                    pageProgressBar.setProgress(progress);
+                    if (s == session) {
+                        pageProgressBar.setProgress(progress);
+                    }
                 });
             }
 
             @Override
             public void onPageStop(GeckoSession geckoSession, boolean success) {
                 runOnUiThread(() -> {
-                    isLoading = false;
-                    reloadStopButton.setText("↻");
-                    pageProgressBar.setVisibility(View.GONE);
-                    if (!urlInput.hasFocus()) {
-                        updateDisplayUrl(currentUrl);
-                    }
-                    updateBookmarkIcon();
+                    if (s == session) {
+                        isLoading = false;
+                        reloadStopButton.setText("↻");
+                        pageProgressBar.setVisibility(View.GONE);
+                        if (!urlInput.hasFocus()) {
+                            updateDisplayUrl(currentUrl);
+                        }
+                        updateBookmarkIcon();
+                        updateSecurityBadge();
 
-                    // Record to history if NOT incognito
-                    if (!isIncognito && !TextUtils.isEmpty(currentUrl)) {
-                        String titleToSave = !TextUtils.isEmpty(currentTitle) ? currentTitle : currentUrl;
-                        BrowserHistoryManager.add(BrowserActivity.this, titleToSave, currentUrl);
+                        // Record to history if NOT incognito
+                        if (!isIncognito && !TextUtils.isEmpty(currentUrl)) {
+                            String titleToSave = !TextUtils.isEmpty(currentTitle) ? currentTitle : currentUrl;
+                            BrowserHistoryManager.add(BrowserActivity.this, titleToSave, currentUrl);
+                        }
                     }
                 });
             }
@@ -524,19 +935,16 @@ public class BrowserActivity extends Activity {
             @Override
             public void onSecurityChange(GeckoSession geckoSession, SecurityInformation securityInfo) {
                 runOnUiThread(() -> {
-                    if (isIncognito) {
-                        securityIcon.setText("🕶️");
-                    } else if (securityInfo != null && securityInfo.isSecure) {
-                        securityIcon.setText("🔒");
-                    } else {
-                        securityIcon.setText("🌐");
+                    if (s == session) {
+                        tab.lastSecurityStatus = (securityInfo != null && securityInfo.isSecure) ? 1 : 0;
+                        updateSecurityBadge();
                     }
                 });
             }
         });
 
-        // 4. PermissionDelegate for Site-Specific Location, Camera & Microphone
-        session.setPermissionDelegate(new GeckoSession.PermissionDelegate() {
+        // 8. PermissionDelegate for Site-Specific Location, Camera & Microphone
+        s.setPermissionDelegate(new GeckoSession.PermissionDelegate() {
             @Override
             public GeckoResult<Integer> onContentPermissionRequest(
                     GeckoSession geckoSession,
@@ -555,19 +963,277 @@ public class BrowserActivity extends Activity {
             }
         });
 
-        geckoView = new GeckoView(this);
-        geckoView.setSession(session);
-        containerView.removeAllViews();
-        containerView.addView(geckoView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        return s;
+    }
 
-        // Load starting URL
-        String targetUrl = getIntent().getStringExtra(EXTRA_URL);
-        if (TextUtils.isEmpty(targetUrl)) {
-            targetUrl = "https://www.google.com";
+    private void updateSecurityBadge() {
+        if (isFinishing() || activeTabIndex < 0 || activeTabIndex >= tabs.size()) return;
+        TabItem activeTab = tabs.get(activeTabIndex);
+        if (isIncognito) {
+            securityIcon.setText("🕶️");
+            securityIcon.setTextColor(ACCENT_BLUE);
+        } else if (activeTab.blockedTrackersCount > 0) {
+            securityIcon.setText("🛡️ " + activeTab.blockedTrackersCount);
+            securityIcon.setTextColor(ACCENT_COLOR);
+        } else if (activeTab.lastSecurityStatus == 1) {
+            securityIcon.setText("🔒");
+            securityIcon.setTextColor(TEXT_COLOR);
+        } else {
+            securityIcon.setText("🌐");
+            securityIcon.setTextColor(MUTED_COLOR);
+        }
+    }
+
+    private void handleContentCrash(GeckoSession crashingSession) {
+        if (isFinishing()) return;
+        Toast.makeText(this, "⚠️ Web content process recovered. Reloading page…", Toast.LENGTH_SHORT).show();
+        if (crashingSession != null) {
+            crashingSession.reload();
+        }
+    }
+
+    private void showWebContextMenu(GeckoSession.ContentDelegate.ContextElement element) {
+        if (element == null || isFinishing()) return;
+        List<String> items = new ArrayList<>();
+        List<Runnable> actions = new ArrayList<>();
+
+        if (!TextUtils.isEmpty(element.linkUri)) {
+            items.add("🔗  Open Link in New Tab");
+            actions.add(() -> createNewTab(element.linkUri));
+
+            items.add("📋  Copy Link Address");
+            actions.add(() -> {
+                ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                if (cm != null) {
+                    cm.setPrimaryClip(ClipData.newPlainText("Link", element.linkUri));
+                    Toast.makeText(this, "Link copied to clipboard", Toast.LENGTH_SHORT).show();
+                }
+            });
+
+            items.add("↗️  Share Link (Clean)");
+            actions.add(() -> {
+                Intent share = new Intent(Intent.ACTION_SEND);
+                share.setType("text/plain");
+                share.putExtra(Intent.EXTRA_TEXT, stripTrackingParameters(element.linkUri));
+                startActivity(Intent.createChooser(share, "Share Link"));
+            });
         }
 
-        installFiltersAndLoad(targetUrl);
+        if (!TextUtils.isEmpty(element.srcUri) && element.type == GeckoSession.ContentDelegate.ContextElement.TYPE_IMAGE) {
+            items.add("🖼️  Open Image in New Tab");
+            actions.add(() -> createNewTab(element.srcUri));
+
+            items.add("📋  Copy Image URL");
+            actions.add(() -> {
+                ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                if (cm != null) {
+                    cm.setPrimaryClip(ClipData.newPlainText("Image URL", element.srcUri));
+                    Toast.makeText(this, "Image URL copied", Toast.LENGTH_SHORT).show();
+                }
+            });
+
+            items.add("↗️  Share Image URL");
+            actions.add(() -> {
+                Intent share = new Intent(Intent.ACTION_SEND);
+                share.setType("text/plain");
+                share.putExtra(Intent.EXTRA_TEXT, element.srcUri);
+                startActivity(Intent.createChooser(share, "Share Image"));
+            });
+        }
+
+        if (items.isEmpty()) return;
+
+        AlertDialog.Builder b = new AlertDialog.Builder(this);
+        String headerTitle = !TextUtils.isEmpty(element.title) ? element.title :
+                (!TextUtils.isEmpty(element.linkText) ? element.linkText :
+                (!TextUtils.isEmpty(element.linkUri) ? element.linkUri : "Web Element"));
+        if (headerTitle.length() > 42) headerTitle = headerTitle.substring(0, 39) + "…";
+        b.setTitle(headerTitle);
+        b.setItems(items.toArray(new String[0]), (d, which) -> {
+            if (which >= 0 && which < actions.size()) {
+                actions.get(which).run();
+            }
+        });
+        b.show();
+    }
+
+    private void createNewTab(String url) {
+        String id = "tab_" + System.currentTimeMillis();
+        TabItem newTab = new TabItem(id, url, "New Tab", null);
+        newTab.session = createGeckoSession(newTab);
+        tabs.add(newTab);
+        switchToTab(tabs.size() - 1);
+        installFiltersAndLoad(url);
         startTimerIfReady();
+        updateTabsBadge();
+    }
+
+    private void switchToTab(int index) {
+        if (index < 0 || index >= tabs.size()) return;
+        activeTabIndex = index;
+        TabItem tab = tabs.get(index);
+        session = tab.session;
+        if (geckoView != null) {
+            geckoView.setSession(tab.session);
+        }
+        currentUrl = tab.url != null ? tab.url : "https://www.google.com";
+        currentTitle = tab.title != null ? tab.title : "";
+        updateDisplayUrl(currentUrl);
+        updateSiteMode(currentUrl);
+        updateBookmarkIcon();
+        updateTabsBadge();
+        updateSecurityBadge();
+    }
+
+    private void closeTab(int index) {
+        if (index < 0 || index >= tabs.size()) return;
+        TabItem removed = tabs.remove(index);
+        if (removed.session != null) {
+            removed.session.close();
+        }
+        if (tabs.isEmpty()) {
+            createNewTab("https://www.google.com");
+        } else {
+            if (activeTabIndex >= tabs.size()) {
+                activeTabIndex = tabs.size() - 1;
+            }
+            switchToTab(activeTabIndex);
+        }
+        updateTabsBadge();
+    }
+
+    private void updateTabsBadge() {
+        if (tabsButton != null) {
+            tabsButton.setText(String.valueOf(tabs.size()));
+        }
+    }
+
+    private void showTabTray() {
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(18), dp(16), dp(18), dp(16));
+        content.setBackgroundColor(SURFACE_COLOR);
+
+        // Header: Tabs count + New Tab
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(0, 0, 0, dp(14));
+
+        TextView title = new TextView(this);
+        title.setText("Open Tabs (" + tabs.size() + ")");
+        title.setTextSize(17);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        title.setTextColor(TEXT_COLOR);
+        header.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
+
+        TextView newTabBtn = new TextView(this);
+        newTabBtn.setText("➕ New Tab");
+        newTabBtn.setTextSize(12);
+        newTabBtn.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        newTabBtn.setTextColor(Color.WHITE);
+        newTabBtn.setPadding(dp(12), dp(6), dp(12), dp(6));
+        GradientDrawable nBg = new GradientDrawable();
+        nBg.setColor(ACCENT_COLOR);
+        nBg.setCornerRadius(dp(12));
+        newTabBtn.setBackground(nBg);
+        newTabBtn.setClickable(true);
+        header.addView(newTabBtn);
+        content.addView(header);
+
+        // List of Tabs
+        LinearLayout tabListContainer = new LinearLayout(this);
+        tabListContainer.setOrientation(LinearLayout.VERTICAL);
+
+        AlertDialog dialog = builder.setView(content).create();
+
+        newTabBtn.setOnClickListener(v -> {
+            dialog.dismiss();
+            createNewTab("https://www.google.com");
+            urlInput.requestFocus();
+            urlInput.setText("");
+            showKeyboard();
+        });
+
+        for (int i = 0; i < tabs.size(); i++) {
+            final int tabIdx = i;
+            final TabItem item = tabs.get(i);
+            boolean isActive = (i == activeTabIndex);
+
+            LinearLayout tabCard = new LinearLayout(this);
+            tabCard.setOrientation(LinearLayout.HORIZONTAL);
+            tabCard.setGravity(Gravity.CENTER_VERTICAL);
+            tabCard.setPadding(dp(12), dp(10), dp(12), dp(10));
+            GradientDrawable cBg = new GradientDrawable();
+            cBg.setColor(isActive ? Color.rgb(28, 42, 65) : Color.rgb(18, 24, 38));
+            cBg.setCornerRadius(dp(12));
+            cBg.setStroke(dp(1), isActive ? ACCENT_COLOR : Color.rgb(40, 56, 84));
+            tabCard.setBackground(cBg);
+            tabCard.setClickable(true);
+
+            // Icon
+            ImageView icon = new ImageView(this);
+            int logoRes = getLogoForUrl(item.url);
+            if (logoRes != 0) {
+                icon.setImageResource(logoRes);
+            } else {
+                icon.setImageResource(android.R.drawable.ic_menu_compass);
+            }
+            tabCard.addView(icon, new LinearLayout.LayoutParams(dp(26), dp(26)));
+
+            // Text Col
+            LinearLayout tCol = new LinearLayout(this);
+            tCol.setOrientation(LinearLayout.VERTICAL);
+            tCol.setPadding(dp(10), 0, dp(10), 0);
+
+            TextView tabTitle = new TextView(this);
+            tabTitle.setText(!TextUtils.isEmpty(item.title) ? item.title : "Tab " + (i + 1));
+            tabTitle.setTextSize(13);
+            tabTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+            tabTitle.setTextColor(TEXT_COLOR);
+            tabTitle.setSingleLine(true);
+            tCol.addView(tabTitle);
+
+            TextView tabHost = new TextView(this);
+            tabHost.setText(SitePermissionManager.cleanHost(item.url) + (isActive ? " • Active" : ""));
+            tabHost.setTextSize(11);
+            tabHost.setTextColor(isActive ? ACCENT_COLOR : MUTED_COLOR);
+            tCol.addView(tabHost);
+
+            tabCard.addView(tCol, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
+
+            // Close Tab Button (✕)
+            TextView closeBtn = new TextView(this);
+            closeBtn.setText("✕");
+            closeBtn.setTextSize(14);
+            closeBtn.setTextColor(MUTED_COLOR);
+            closeBtn.setPadding(dp(8), dp(6), dp(8), dp(6));
+            closeBtn.setClickable(true);
+            closeBtn.setOnClickListener(v -> {
+                dialog.dismiss();
+                closeTab(tabIdx);
+                if (!tabs.isEmpty()) {
+                    showTabTray();
+                }
+            });
+            tabCard.addView(closeBtn);
+
+            tabCard.setOnClickListener(v -> {
+                dialog.dismiss();
+                switchToTab(tabIdx);
+            });
+
+            LinearLayout.LayoutParams tcParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            tcParams.bottomMargin = dp(8);
+            tabListContainer.addView(tabCard, tcParams);
+        }
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(tabListContainer);
+        content.addView(scroll);
+
+        dialog.show();
     }
 
     /**
@@ -688,22 +1354,45 @@ public class BrowserActivity extends Activity {
 
     private void showOverflowMenu(View anchor) {
         PopupMenu popup = new PopupMenu(this, anchor);
-        popup.getMenu().add(0, 1, 0, "➕  New Search / Tab");
-        popup.getMenu().add(0, 2, 1, isIncognito ? "🌐  Exit Incognito Mode" : "🕶️  New Incognito Tab");
-        popup.getMenu().add(0, 3, 2, BookmarkManager.isBookmarked(this, currentUrl) ? "★  Remove Bookmark" : "☆  Add Bookmark");
-        popup.getMenu().add(0, 4, 3, "🕒  Browsing History");
-        popup.getMenu().add(0, 5, 4, "🔖  Bookmarks");
-        popup.getMenu().add(0, 6, 5, (isDesktopMode ? "☑️ " : "☐ ") + "Desktop Site");
-        popup.getMenu().add(0, 7, 6, "⚙️  Site Permissions & Settings");
-        popup.getMenu().add(0, 8, 7, "↗️  Share Webpage");
-        popup.getMenu().add(0, 9, 8, "🗑️  Clear Browsing History");
+        popup.getMenu().add(0, 1, 0, "➕  New Tab");
+        popup.getMenu().add(0, 13, 1, "🔍  Find in Page");
+        popup.getMenu().add(0, 12, 1, "🗂️  Tab Switcher (" + tabs.size() + ")");
+        popup.getMenu().add(0, 2, 2, isIncognito ? "🌐  Exit Incognito Mode" : "🕶️  New Incognito Tab");
+        if (!UsageTracker.isSiteLimited(this, currentUrl)) {
+            popup.getMenu().add(0, 10, 2, "📖  Clean Reader View");
+        }
+        boolean currentSiteLimited = UsageTracker.isSiteLimited(this, currentUrl);
+        popup.getMenu().add(0, 11, 3, currentSiteLimited ? "⏱️  Make Site Unlimited" : "⏱️  Add to Focus Daily Limit");
+        popup.getMenu().add(0, 3, 4, BookmarkManager.isBookmarked(this, currentUrl) ? "★  Remove Bookmark" : "☆  Add Bookmark");
+        popup.getMenu().add(0, 4, 4, "🕒  Browsing History");
+        popup.getMenu().add(0, 5, 5, "🔖  Bookmarks");
+        popup.getMenu().add(0, 6, 6, (isDesktopMode ? "☑️ " : "☐ ") + "Desktop Site");
+        popup.getMenu().add(0, 7, 7, "⚙️  Site Permissions & Settings");
+        popup.getMenu().add(0, 8, 8, "↗️  Share Webpage");
+        popup.getMenu().add(0, 9, 9, "🗑️  Clear Browsing History");
 
         popup.setOnMenuItemClickListener(item -> {
             switch (item.getItemId()) {
+                case 10:
+                    toggleReaderView();
+                    return true;
+                case 11:
+                    String cHost = SitePermissionManager.cleanHost(currentUrl);
+                    boolean nowLim = UsageTracker.toggleSiteLimit(this, cHost);
+                    Toast.makeText(this, cHost + (nowLim ? " added to Focus Daily Limit." : " set to Unlimited Browsing."), Toast.LENGTH_SHORT).show();
+                    updateSiteMode(currentUrl);
+                    return true;
                 case 1:
+                    createNewTab("https://www.google.com");
                     urlInput.requestFocus();
                     urlInput.setText("");
                     showKeyboard();
+                    return true;
+                case 12:
+                    showTabTray();
+                    return true;
+                case 13:
+                    showFindInPage();
                     return true;
                 case 2:
                     Intent incognitoIntent = new Intent(this, BrowserActivity.class);
@@ -859,7 +1548,7 @@ public class BrowserActivity extends Activity {
         content.setPadding(dp(18), dp(18), dp(18), dp(18));
 
         TextView title = new TextView(this);
-        title.setText("Permissions for " + host);
+        title.setText("Security & Permissions: " + host);
         title.setTextSize(17);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         title.setTextColor(TEXT_COLOR);
@@ -869,13 +1558,79 @@ public class BrowserActivity extends Activity {
         secBadge.setText("🔒 Connection is secure (HTTPS)");
         secBadge.setTextSize(12);
         secBadge.setTextColor(ACCENT_COLOR);
-        secBadge.setPadding(0, dp(4), 0, dp(14));
+        secBadge.setPadding(0, dp(4), 0, dp(10));
         content.addView(secBadge);
+
+        TabItem currentTab = (activeTabIndex >= 0 && activeTabIndex < tabs.size()) ? tabs.get(activeTabIndex) : null;
+        int blockedCount = (currentTab != null) ? currentTab.blockedTrackersCount : 0;
+
+        LinearLayout etpCard = new LinearLayout(this);
+        etpCard.setOrientation(LinearLayout.VERTICAL);
+        etpCard.setPadding(dp(12), dp(10), dp(12), dp(10));
+        GradientDrawable etpBg = new GradientDrawable();
+        etpBg.setColor(Color.rgb(15, 23, 42));
+        etpBg.setCornerRadius(dp(10));
+        etpBg.setStroke(dp(1), Color.rgb(16, 185, 129));
+        etpCard.setBackground(etpBg);
+
+        TextView etpTitle = new TextView(this);
+        etpTitle.setText("🛡️ Enhanced Tracking Protection (Strict)");
+        etpTitle.setTextSize(13);
+        etpTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        etpTitle.setTextColor(ACCENT_COLOR);
+        etpCard.addView(etpTitle);
+
+        TextView etpStats = new TextView(this);
+        etpStats.setText(blockedCount > 0 ?
+                ("GeckoView blocked " + blockedCount + " tracking scripts, cookies & beacons on this page.") :
+                "Strict protection active. Cross-site tracking cookies & fingerprinters blocked.");
+        etpStats.setTextSize(11);
+        etpStats.setTextColor(Color.rgb(203, 213, 225));
+        etpStats.setPadding(0, dp(4), 0, 0);
+        etpCard.addView(etpStats);
+
+        LinearLayout.LayoutParams etpParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        etpParams.bottomMargin = dp(14);
+        content.addView(etpCard, etpParams);
 
         content.addView(createQuickPermRow(host, "📍 Location Access", SitePermissionManager.PERM_LOCATION));
         content.addView(createQuickPermRow(host, "📷 Camera Access", SitePermissionManager.PERM_CAMERA));
         content.addView(createQuickPermRow(host, "🎙️ Microphone Access", SitePermissionManager.PERM_MICROPHONE));
         content.addView(createQuickPermRow(host, "🔔 Notifications", SitePermissionManager.PERM_NOTIFICATIONS));
+
+        // Focus & Daily Limit Toggle for this site
+        boolean isLimited = UsageTracker.isSiteLimited(this, host);
+        LinearLayout limitRow = new LinearLayout(this);
+        limitRow.setOrientation(LinearLayout.HORIZONTAL);
+        limitRow.setGravity(Gravity.CENTER_VERTICAL);
+        limitRow.setPadding(0, dp(10), 0, dp(6));
+
+        TextView limitLabel = new TextView(this);
+        limitLabel.setText("⏱️ Daily Focus Limit");
+        limitLabel.setTextSize(13);
+        limitLabel.setTextColor(TEXT_COLOR);
+        limitRow.addView(limitLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
+
+        TextView limitToggleBtn = new TextView(this);
+        limitToggleBtn.setText(isLimited ? "Limited (Timed)" : "Unlimited");
+        limitToggleBtn.setTextSize(11);
+        limitToggleBtn.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        limitToggleBtn.setTextColor(Color.WHITE);
+        limitToggleBtn.setPadding(dp(10), dp(6), dp(10), dp(6));
+        GradientDrawable ltBg = new GradientDrawable();
+        ltBg.setColor(isLimited ? Color.rgb(251, 146, 60) : Color.rgb(40, 56, 84));
+        ltBg.setCornerRadius(dp(8));
+        limitToggleBtn.setBackground(ltBg);
+        limitToggleBtn.setClickable(true);
+        limitToggleBtn.setOnClickListener(v -> {
+            boolean nowLimited = UsageTracker.toggleSiteLimit(BrowserActivity.this, host);
+            ltBg.setColor(nowLimited ? Color.rgb(251, 146, 60) : Color.rgb(40, 56, 84));
+            limitToggleBtn.setText(nowLimited ? "Limited (Timed)" : "Unlimited");
+            Toast.makeText(BrowserActivity.this, host + (nowLimited ? " added to Focus Daily Limit." : " set to Unlimited Browsing."), Toast.LENGTH_SHORT).show();
+            updateSiteMode(currentUrl);
+        });
+        limitRow.addView(limitToggleBtn);
+        content.addView(limitRow);
 
         Button allSettingsBtn = new Button(this);
         allSettingsBtn.setText("Manage All Sites Settings →");
@@ -974,11 +1729,34 @@ public class BrowserActivity extends Activity {
 
     private void shareCurrentPage() {
         if (TextUtils.isEmpty(currentUrl)) return;
+        String cleanUrl = stripTrackingParameters(currentUrl);
         Intent shareIntent = new Intent(Intent.ACTION_SEND);
         shareIntent.setType("text/plain");
         shareIntent.putExtra(Intent.EXTRA_SUBJECT, currentTitle);
-        shareIntent.putExtra(Intent.EXTRA_TEXT, currentUrl);
-        startActivity(Intent.createChooser(shareIntent, "Share webpage"));
+        shareIntent.putExtra(Intent.EXTRA_TEXT, cleanUrl);
+        startActivity(Intent.createChooser(shareIntent, "Share webpage (clean link)"));
+    }
+
+    private static String stripTrackingParameters(String url) {
+        try {
+            Uri uri = Uri.parse(url);
+            if (uri.getQuery() == null) return url;
+            Uri.Builder builder = uri.buildUpon().clearQuery();
+            for (String param : uri.getQueryParameterNames()) {
+                String lower = param.toLowerCase();
+                if (lower.startsWith("utm_") || lower.equals("fbclid") || lower.equals("gclid")
+                        || lower.equals("si") || lower.equals("igshid") || lower.equals("mc_cid")
+                        || lower.equals("mc_eid") || lower.equals("ref") || lower.equals("ref_src")) {
+                    continue; // Skip tracking param
+                }
+                for (String val : uri.getQueryParameters(param)) {
+                    builder.appendQueryParameter(param, val);
+                }
+            }
+            return builder.build().toString();
+        } catch (Exception e) {
+            return url;
+        }
     }
 
     private void showHistoryDialog() {
@@ -1201,14 +1979,25 @@ public class BrowserActivity extends Activity {
     }
 
     private void recordUsage(boolean force) {
+        recordBrowsingUsage();
         if (activeSegmentStartElapsed < 0 || sessionDurationMillis <= 0) return;
         long activeMillis = SystemClock.elapsedRealtime() - activeSegmentStartElapsed;
         long elapsed = Math.min(completedSessionMillis + activeMillis, sessionDurationMillis);
         long elapsedSeconds = TimeUnit.MILLISECONDS.toSeconds(elapsed);
         long unrecordedSeconds = elapsedSeconds - recordedSeconds;
         if (unrecordedSeconds > 0 && (force || unrecordedSeconds >= 30)) {
-            UsageTracker.addSessionSeconds(this, unrecordedSeconds, "extra".equals(sessionSource));
+            UsageTracker.recordSiteSeconds(this, currentUrl, unrecordedSeconds, true, "extra".equals(sessionSource));
             recordedSeconds = elapsedSeconds;
+        }
+    }
+
+    private void recordBrowsingUsage() {
+        if (activeBrowsingStartElapsed < 0 || isIncognito) return;
+        long now = SystemClock.elapsedRealtime();
+        long elapsedSec = TimeUnit.MILLISECONDS.toSeconds(now - activeBrowsingStartElapsed);
+        if (elapsedSec > 0) {
+            UsageTracker.recordSiteSeconds(this, currentUrl, elapsedSec, false, false);
+            activeBrowsingStartElapsed = now;
         }
     }
 
@@ -1234,6 +2023,10 @@ public class BrowserActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (findInPageLayout != null && findInPageLayout.getVisibility() == View.VISIBLE) {
+            hideFindInPage();
+            return;
+        }
         if (isFullScreen) {
             if (session != null) {
                 session.exitFullScreen();
@@ -1257,12 +2050,16 @@ public class BrowserActivity extends Activity {
     protected void onResume() {
         super.onResume();
         browserVisible = true;
-        startTimerIfReady();
+        if (UsageTracker.isSiteLimited(this, currentUrl)) {
+            startTimerIfReady();
+        } else if (!isIncognito) {
+            activeBrowsingStartElapsed = SystemClock.elapsedRealtime();
+        }
     }
 
     private void startTimerIfReady() {
         if (!browserVisible || session == null || remainingSessionMillis <= 0 || activeSegmentStartElapsed >= 0) return;
-        if (!UsageTracker.isSocialSite(currentUrl)) return; // Only run timer on social sites!
+        if (!UsageTracker.isSiteLimited(this, currentUrl)) return; // Only run timer on limited focus sites!
         activeSegmentStartElapsed = SystemClock.elapsedRealtime();
         endTime = activeSegmentStartElapsed + remainingSessionMillis;
         handler.post(timerTick);
@@ -1273,6 +2070,7 @@ public class BrowserActivity extends Activity {
         browserVisible = false;
         handler.removeCallbacks(timerTick);
         recordUsage(true);
+        activeBrowsingStartElapsed = -1;
         if (activeSegmentStartElapsed >= 0) {
             long now = SystemClock.elapsedRealtime();
             completedSessionMillis = Math.min(sessionDurationMillis, completedSessionMillis + now - activeSegmentStartElapsed);
@@ -1287,10 +2085,13 @@ public class BrowserActivity extends Activity {
         handler.removeCallbacks(timerTick);
         recordUsage(true);
         endRemoteSession();
-        if (session != null) {
-            session.close();
-            session = null;
+        for (TabItem t : tabs) {
+            if (t.session != null) {
+                t.session.close();
+            }
         }
+        tabs.clear();
+        session = null;
         super.onDestroy();
     }
 

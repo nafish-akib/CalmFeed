@@ -189,6 +189,36 @@
     "ytm-browse[page-subtype='home'] ytm-rich-grid-renderer",
     "ytm-browse[page-subtype='home'] ytm-item-section-renderer"
   ];
+  const adSelectors = [
+    "[id^='google_ads_']",
+    "[id^='div-gpt-ad']",
+    "[id*='ad-container']",
+    "[id*='banner-ad']",
+    "[class*='advertisement']",
+    "[class*='ad-banner']",
+    "[class*='sponsored-post']",
+    "[class*='sponsored-content']",
+    "[data-ad-client]",
+    "[data-ad-slot]",
+    "ins.adsbygoogle",
+    "div[class*='taboola']",
+    "div[id*='taboola']",
+    "div[class*='outbrain']",
+    "div[id*='outbrain']",
+    ".ad-box",
+    ".ad-wrapper",
+    ".adunit",
+    ".native-ad",
+    ".top-ad-bar",
+    ".bottom-ad-bar",
+    ".sticky-ad",
+    ".cookie-banner",
+    "#cookie-consent",
+    ".consent-banner",
+    ".cmp-container",
+    ".truste_box_overlay",
+    "div[id*='onetrust']"
+  ];
   let lastScrollAt = 0;
   let touchStartY = null;
   let limitOverlay = null;
@@ -383,12 +413,14 @@
 
   hideMatches(document, reelSelectors);
   hideMatches(document, recommendationSelectors);
+  hideMatches(document, adSelectors);
 
   const observer = new MutationObserver((records) => {
     for (const record of records) {
       for (const node of record.addedNodes) {
         hideMatches(node, reelSelectors);
         hideMatches(node, recommendationSelectors);
+        hideMatches(node, adSelectors);
       }
     }
   });
@@ -434,4 +466,398 @@
   document.addEventListener("touchmove", blockInteraction, { passive: false, capture: true });
   document.addEventListener("wheel", blockInteraction, { passive: false, capture: true });
   document.addEventListener("keydown", blockInteraction, true);
+
+  // =========================================================================
+  // 3. CLEAN READER VIEW (FOR ARTICLES, NEWS, WIKIPEDIA & BROWSING MODE)
+  // =========================================================================
+  let readerFontSize = parseInt(localStorage.getItem("calmfeed_reader_size") || "18", 10);
+  let readerTheme = localStorage.getItem("calmfeed_reader_theme") || "sepia";
+  let readerFontFamily = localStorage.getItem("calmfeed_reader_font") || "serif";
+
+  function extractArticleContent() {
+    // 1. Title
+    const titleEl = document.querySelector("meta[property='og:title']") || document.querySelector("h1") || null;
+    const title = titleEl ? (titleEl.content || titleEl.innerText || "").trim() : document.title;
+
+    // 2. Author / Byline
+    const authorEl = document.querySelector("meta[name='author']") ||
+      document.querySelector("[rel='author'], .byline, .author, .author-name, .c-byline, .published") || null;
+    const author = authorEl ? (authorEl.content || authorEl.innerText || "").trim() : "";
+
+    // 3. Candidate containers
+    const candidateSelectors = [
+      "#mw-content-text", // Wikipedia
+      "article",
+      "[role='main']",
+      ".article-body",
+      ".post-content",
+      ".entry-content",
+      ".story-body",
+      ".article__body",
+      ".main-content",
+      ".article-content",
+      "main"
+    ];
+
+    let contentContainer = null;
+    for (const sel of candidateSelectors) {
+      const el = document.querySelector(sel);
+      if (el && el.innerText && el.innerText.trim().length > 300) {
+        contentContainer = el;
+        break;
+      }
+    }
+
+    // Heuristic fallback: find element with highest text length and paragraph density
+    if (!contentContainer) {
+      let maxScore = 0;
+      const divs = document.querySelectorAll("div, section");
+      for (const div of divs) {
+        const pCount = div.querySelectorAll("p").length;
+        const textLen = (div.innerText || "").length;
+        const score = pCount * 80 + textLen;
+        if (score > maxScore) {
+          maxScore = score;
+          contentContainer = div;
+        }
+      }
+    }
+
+    // Clone content
+    let bodyHtml = "";
+    if (contentContainer) {
+      const clone = contentContainer.cloneNode(true);
+
+      // Strip clutter
+      const badSelectors = [
+        "script", "style", "noscript", "iframe", "form", "button", "nav", "aside",
+        "header", "footer", "menu", ".ad", ".ads", ".advertisement", ".sidebar",
+        ".social-share", ".share-buttons", ".comments", ".comment-section",
+        ".newsletter", ".subscribe", ".popup", ".banner", ".cookie", ".mw-editsection"
+      ];
+      for (const bad of badSelectors) {
+        const badNodes = clone.querySelectorAll(bad);
+        for (const n of badNodes) {
+          try { n.remove(); } catch (_) {}
+        }
+      }
+
+      // Clean images
+      const imgs = clone.querySelectorAll("img");
+      for (const img of imgs) {
+        const src = img.getAttribute("src") || img.getAttribute("data-src") || "";
+        if (!src || src.startsWith("data:") && src.length < 200) {
+          img.remove();
+        } else {
+          img.removeAttribute("srcset");
+          img.removeAttribute("sizes");
+          if (img.getAttribute("data-src")) {
+            img.src = img.getAttribute("data-src");
+          }
+          img.style.maxWidth = "100%";
+          img.style.height = "auto";
+          img.style.borderRadius = "8px";
+          img.style.margin = "20px auto";
+          img.style.display = "block";
+        }
+      }
+
+      bodyHtml = clone.innerHTML;
+    }
+
+    // Paragraph fallback
+    if (!bodyHtml || bodyHtml.replace(/<[^>]*>/g, "").trim().length < 150) {
+      const paragraphs = document.querySelectorAll("p");
+      const cleanPs = [];
+      for (const p of paragraphs) {
+        const txt = (p.innerText || "").trim();
+        if (txt.length > 40) {
+          cleanPs.push("<p>" + p.innerHTML + "</p>");
+        }
+      }
+      bodyHtml = cleanPs.join("\n");
+    }
+
+    const plainText = bodyHtml.replace(/<[^>]*>/g, " ");
+    const words = plainText.split(/\s+/).filter(Boolean).length;
+    const readMinutes = Math.max(1, Math.round(words / 220));
+
+    return {
+      title,
+      author,
+      domain: location.hostname.replace(/^www\./, ""),
+      readTime: readMinutes + " min read",
+      words,
+      html: bodyHtml
+    };
+  }
+
+  function getThemeStyles(theme) {
+    if (theme === "dark") {
+      return {
+        bg: "#111622",
+        cardBg: "#1a2233",
+        text: "#e2e8f0",
+        heading: "#f8fafc",
+        muted: "#94a3b8",
+        border: "#2d3748",
+        barBg: "#0d1117"
+      };
+    }
+    if (theme === "light") {
+      return {
+        bg: "#faf8f5",
+        cardBg: "#ffffff",
+        text: "#292524",
+        heading: "#1c1917",
+        muted: "#78716c",
+        border: "#e7e5e4",
+        barBg: "#f5f5f4"
+      };
+    }
+    // Sepia (default)
+    return {
+      bg: "#f5eee1",
+      cardBg: "#faede0",
+      text: "#443427",
+      heading: "#2c2017",
+      muted: "#7d6b5b",
+      border: "#decbb7",
+      barBg: "#ede3d2"
+    };
+  }
+
+  function toggleReaderView() {
+    const existing = document.getElementById("calmfeed-reader-overlay");
+    if (existing) {
+      existing.remove();
+      if (document.body) {
+        document.body.style.removeProperty("overflow");
+      }
+      return;
+    }
+
+    const article = extractArticleContent();
+    if (!article.html || article.html.length < 80) {
+      alert("No readable article content found on this page.");
+      return;
+    }
+
+    const overlay = document.createElement("div");
+    overlay.id = "calmfeed-reader-overlay";
+    Object.assign(overlay.style, {
+      position: "fixed",
+      inset: "0",
+      zIndex: "2147483647",
+      overflowY: "auto",
+      fontFamily: readerFontFamily === "serif" ? "Georgia, 'Merriweather', serif" : "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+      transition: "background 0.2s, color 0.2s"
+    });
+
+    const applyTheme = (theme) => {
+      readerTheme = theme;
+      localStorage.setItem("calmfeed_reader_theme", theme);
+      const colors = getThemeStyles(theme);
+      overlay.style.backgroundColor = colors.bg;
+      overlay.style.color = colors.text;
+
+      const bar = overlay.querySelector("#calmfeed-reader-bar");
+      if (bar) {
+        bar.style.backgroundColor = colors.barBg;
+        bar.style.borderBottomColor = colors.border;
+        bar.style.color = colors.text;
+      }
+      const titleNode = overlay.querySelector("#calmfeed-reader-title");
+      if (titleNode) titleNode.style.color = colors.heading;
+      const metaNode = overlay.querySelector("#calmfeed-reader-meta");
+      if (metaNode) metaNode.style.color = colors.muted;
+      const dividerNode = overlay.querySelector("#calmfeed-reader-divider");
+      if (dividerNode) dividerNode.style.borderColor = colors.border;
+    };
+
+    const applyFontSize = (size) => {
+      readerFontSize = Math.max(14, Math.min(30, size));
+      localStorage.setItem("calmfeed_reader_size", readerFontSize);
+      const bodyNode = overlay.querySelector("#calmfeed-reader-body");
+      if (bodyNode) {
+        bodyNode.style.fontSize = readerFontSize + "px";
+        bodyNode.style.lineHeight = "1.85";
+      }
+    };
+
+    const applyFontFamily = (font) => {
+      readerFontFamily = font;
+      localStorage.setItem("calmfeed_reader_font", font);
+      overlay.style.fontFamily = font === "serif" ? "Georgia, 'Merriweather', serif" : "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+    };
+
+    // Header Toolbar
+    const bar = document.createElement("div");
+    bar.id = "calmfeed-reader-bar";
+    Object.assign(bar.style, {
+      position: "sticky",
+      top: "0",
+      zIndex: "10",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      padding: "10px 16px",
+      borderBottom: "1px solid",
+      backdropFilter: "blur(12px)",
+      userSelect: "none"
+    });
+
+    const leftGroup = document.createElement("div");
+    leftGroup.style.display = "flex";
+    leftGroup.style.alignItems = "center";
+    leftGroup.style.gap = "8px";
+
+    const badge = document.createElement("span");
+    badge.textContent = "📖 Clean Reader";
+    badge.style.fontWeight = "bold";
+    badge.style.fontSize = "13px";
+    badge.style.color = "#10b981";
+
+    const timeBadge = document.createElement("span");
+    timeBadge.textContent = "• " + article.readTime;
+    timeBadge.style.fontSize = "12px";
+    timeBadge.style.opacity = "0.7";
+
+    leftGroup.append(badge, timeBadge);
+
+    const rightGroup = document.createElement("div");
+    rightGroup.style.display = "flex";
+    rightGroup.style.alignItems = "center";
+    rightGroup.style.gap = "6px";
+
+    const btnStyle = (btn) => {
+      Object.assign(btn.style, {
+        background: "transparent",
+        border: "1px solid rgba(120,120,120,0.3)",
+        borderRadius: "8px",
+        padding: "4px 8px",
+        fontSize: "12px",
+        cursor: "pointer",
+        color: "inherit"
+      });
+    };
+
+    // Font size controls
+    const btnSmaller = document.createElement("button");
+    btnSmaller.textContent = "A-";
+    btnStyle(btnSmaller);
+    btnSmaller.onclick = () => applyFontSize(readerFontSize - 2);
+
+    const btnBigger = document.createElement("button");
+    btnBigger.textContent = "A+";
+    btnStyle(btnBigger);
+    btnBigger.onclick = () => applyFontSize(readerFontSize + 2);
+
+    // Font family toggle
+    const btnFont = document.createElement("button");
+    btnFont.textContent = readerFontFamily === "serif" ? "Sans" : "Serif";
+    btnStyle(btnFont);
+    btnFont.onclick = () => {
+      const nextFont = readerFontFamily === "serif" ? "sans" : "serif";
+      btnFont.textContent = nextFont === "serif" ? "Sans" : "Serif";
+      applyFontFamily(nextFont);
+    };
+
+    // Theme toggles
+    const btnSepia = document.createElement("button");
+    btnSepia.textContent = "📜";
+    btnStyle(btnSepia);
+    btnSepia.title = "Sepia Theme";
+    btnSepia.onclick = () => applyTheme("sepia");
+
+    const btnDark = document.createElement("button");
+    btnDark.textContent = "🌙";
+    btnStyle(btnDark);
+    btnDark.title = "Dark Theme";
+    btnDark.onclick = () => applyTheme("dark");
+
+    const btnLight = document.createElement("button");
+    btnLight.textContent = "☀️";
+    btnStyle(btnLight);
+    btnLight.title = "Light Theme";
+    btnLight.onclick = () => applyTheme("light");
+
+    // Close button
+    const btnClose = document.createElement("button");
+    btnClose.textContent = "✕ Exit";
+    btnStyle(btnClose);
+    btnClose.style.fontWeight = "bold";
+    btnClose.style.borderColor = "#10b981";
+    btnClose.style.color = "#10b981";
+    btnClose.onclick = () => {
+      overlay.remove();
+      if (document.body) document.body.style.removeProperty("overflow");
+    };
+
+    rightGroup.append(btnSmaller, btnBigger, btnFont, btnSepia, btnDark, btnLight, btnClose);
+    bar.append(leftGroup, rightGroup);
+
+    // Article Container
+    const container = document.createElement("main");
+    Object.assign(container.style, {
+      maxWidth: "720px",
+      margin: "0 auto",
+      padding: "36px 20px 100px",
+      boxSizing: "border-box"
+    });
+
+    const titleH1 = document.createElement("h1");
+    titleH1.id = "calmfeed-reader-title";
+    titleH1.textContent = article.title;
+    Object.assign(titleH1.style, {
+      fontSize: "30px",
+      lineHeight: "1.25",
+      fontWeight: "bold",
+      marginBottom: "12px"
+    });
+
+    const metaRow = document.createElement("div");
+    metaRow.id = "calmfeed-reader-meta";
+    metaRow.style.fontSize = "13px";
+    metaRow.style.marginBottom = "24px";
+    metaRow.style.display = "flex";
+    metaRow.style.flexWrap = "wrap";
+    metaRow.style.gap = "8px";
+
+    const domainSpan = document.createElement("span");
+    domainSpan.textContent = "🌐 " + article.domain;
+    metaRow.appendChild(domainSpan);
+
+    if (article.author) {
+      const authorSpan = document.createElement("span");
+      authorSpan.textContent = "• By " + article.author;
+      metaRow.appendChild(authorSpan);
+    }
+
+    const divider = document.createElement("hr");
+    divider.id = "calmfeed-reader-divider";
+    divider.style.border = "none";
+    divider.style.borderTop = "1px solid";
+    divider.style.margin = "0 0 28px";
+
+    const bodyDiv = document.createElement("div");
+    bodyDiv.id = "calmfeed-reader-body";
+    bodyDiv.innerHTML = article.html;
+    Object.assign(bodyDiv.style, {
+      fontSize: readerFontSize + "px",
+      lineHeight: "1.85",
+      wordBreak: "break-word"
+    });
+
+    container.append(titleH1, metaRow, divider, bodyDiv);
+    overlay.append(bar, container);
+
+    document.documentElement.appendChild(overlay);
+    applyTheme(readerTheme);
+    applyFontSize(readerFontSize);
+    applyFontFamily(readerFontFamily);
+  }
+
+  window.addEventListener("calmfeed:toggle-reader", toggleReaderView);
+  window.__calmfeed_toggle_reader = toggleReaderView;
 })();
